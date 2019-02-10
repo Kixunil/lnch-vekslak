@@ -1,0 +1,30 @@
+<html>
+<head>
+<title>LN channel vekslak</title>
+</head>
+<body>
+<label for="local_amt">Local amount</label><input type="text" name="local_amt" id="local_amt" value="0"><br>
+<label for="push_amt">Push amount</label><input type="text" name="push_amt" id="push_amt" value="0"><br>
+<input type="button" value="Create!" id="btn_create"><br>
+<div id="qrcode">
+</div>
+<script type="text/javascript" src="admin/jquery-3.3.1.min.js"></script>
+<script type="text/javascript" src="admin/qrcode.js"></script>
+<script type="text/javascript">
+	$(document).ready(function() {
+		qrcode = new QRCode("qrcode", { correctLevel: QRCode.CorrectLevel.L });
+
+		$("#btn_create").click(function() {
+			$.ajax("create/" + $("#push_amt").val() + "/" + $("#push_amt").val())
+			.done(function(lnurl) {
+				console.log("LNURL: " + lnurl);
+				qrcode.makeCode(lnurl);
+			})
+			.fail(function() {
+				alert("Failed to create LNURL");
+			})
+		});
+	})
+</script>
+</body>
+</html>

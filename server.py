@@ -90,7 +90,7 @@ class Server:
 				"uri": self._node_addr,
 				"callback": "https://" + self._url_prefix + "/rq/1/",
 				"k1": secret,
-				"capacity": offer[0] + offer[1],
+				"capacity": offer[0],
 				"push": offer[1],
 				"htlcMinimumMsat": 1000,
 				"cltvExpiryDelta": 144,
@@ -113,7 +113,7 @@ class Server:
 			else:
 				return {
 					"status": "ERROR",
-					"reason": "Unimplemented"
+					"reason": "Failed to open a channel"
 				}
 		else:
 			return {

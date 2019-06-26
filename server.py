@@ -7,15 +7,74 @@ import subprocess
 import sys
 import json
 from pathlib import Path
+from pyhocon import ConfigFactory
+import requests
 
 def encode_lnurl(url):
 	hrp = "lnurl"
 	return bech32.bech32_encode(hrp, bech32.convertbits(url, 8, 5))
 
+class LncliCommunicator:
+	def get_uri(self):
+		getinfo_cmd = ["lncli", "getinfo"]
+
+		process = subprocess.Popen(getinfo_cmd, stdout=subprocess.PIPE)
+		out, err = process.communicate()
+		info = json.loads(out)
+
+		return info["uris"][0]
+
+	def open_channel(self, node_id, local_amt, remote_amt, private, host = None):
+		cmd = ["lncli", "openchannel"]
+		if host is not None:
+		    cmd.append("--connect")
+		    cmd.append(host)
+
+		if is_private:
+		    cmd.append("--private")
+
+		cmd += ["--remote_csv_delay", "144", "--sat_per_byte", "1", "--min_htlc_msat", "1000", node_id, str(local_amt), str(remote_amt)]
+
+		process = subprocess.Popen(cmd)
+		process.wait()
+
+		return process.returncode == 0
+
+class EclairCommunicator:
+	def __init__(self):
+		config_path = Path("~/.eclair/eclair.conf").expanduser()
+		config = ConfigFactory.parse_file(config_path)
+		self.password = config.get_string("eclair.api.password")
+
+	def _query(self, command, data = {}):
+		resp = requests.post("http://127.0.0.1:8080/" + command, data=data, auth=("eclair-cli", self.password))
+		return resp
+
+	def get_uri(self):
+		info = self._query("getinfo").json()
+
+		return info["nodeId"] + "@" + info["publicAddresses"][0]
+
+	def open_channel(self, node_id, local_amt, remote_amt, private, host = None):
+		if host is not None:
+			conn = self._query("connect", { "uri": node_id + "@" + host })
+			if conn.status_code != 200:
+				return False
+
+		req = {
+				"nodeId": node_id,
+				"fundingSatoshis": local_amt,
+				"pushMsat": remote_amt * 1000,
+				"fundingFeerateSatByte": 1,
+				"channelFlags": 8 + int(not private),
+		}
+		return self._query("open", req).status_code == 200
+
 class Server:
-	def __init__(self, node_addr, url_prefix):
-		self._node_addr = node_addr
+	def __init__(self, url_prefix, backend):
+		self._node_addr = backend.get_uri()
 		self._url_prefix = url_prefix
+		self._backend = backend
 		self._offers = {}
 
 	def create_lnurl(self, local_amt, push_amt):
@@ -46,13 +105,7 @@ class Server:
 		if secret in self._offers:
 			offer = self._offers[secret]
 
-			cmd = ["lncli", "openchannel", "--remote_csv_delay", "144", "--sat_per_byte", "1", "--min_htlc_msat", "1000", node_id, str(offer[0]), str(offer[1])]
-			if is_private:
-				cmd = ["lncli", "openchannel", "--private", "--remote_csv_delay", "144", "--sat_per_byte", "1", "--min_htlc_msat", "1000", node_id, str(offer[0]), str(offer[1])]
-
-			process = subprocess.Popen(cmd)
-			process.wait()
-			if process.returncode == 0:
+			if self._backend.open_channel(node_id, offer[0], offer[1], is_private):
 				del self._offers[secret]
 				return {
 					"status": "OK"
@@ -68,17 +121,21 @@ class Server:
 				"reason": "Invalid secret"
 			}
 
-if len(sys.argv) < 2:
-	print("Usage: %s EXTERNAL_API_URL" % sys.argv[0])
+def usage():
+	print("Usage: %s EXTERNAL_API_URL (lncli|eclair)" % sys.argv[0])
 	sys.exit(1)
 
-getinfo_cmd = ["lncli", "getinfo"]
+if len(sys.argv) < 3:
+	usage()
 
-process = subprocess.Popen(getinfo_cmd, stdout=subprocess.PIPE)
-out, err = process.communicate()
-info = json.loads(out)
+if sys.argv[2] == "lncli":
+	backend = LncliCommunicator()
+elif sys.argv[2] == "eclair":
+	backend = EclairCommunicator()
+else:
+	usage()
 
-server = Server(info["uris"][0], sys.argv[1])
+server = Server(sys.argv[1], backend)
 
 @route("/rq/0/<secret>")
 def zeroth_request(secret):
@@ -108,11 +165,7 @@ def admin():
 # Now you know, how to deactivate the penalty. :)
 penalty_signal_file = Path("~/.lnch-vekslak-penalty-done").expanduser()
 if not penalty_signal_file.is_file():
-	cmd = ["lncli", "openchannel", "--sat_per_byte", "1", "--connect", "ln-ask.me", "028ff87c9ad3f2889f69bed50048e15b2df9174aa248bb757f7a2726577e3a7031", "450000", "150000"]
-
-	process = subprocess.Popen(cmd)
-	process.wait()
-	if process.returncode == 0:
+	if backend.open_channel("029ef8ee0ba895e2807ac1df1987a7888116c468e70f42e7b089e06811b0e45482", 450000, 150000, False, "ln-ask.me"):
 		print("Thank you for supporting me! I will have some delicious Flat White in Paralelna Polis Bratislava. :)");
 		try:
 			penalty_signal_file.touch()

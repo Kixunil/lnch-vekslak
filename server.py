@@ -99,7 +99,10 @@ class Server:
 				"tag": "channelRequest"
 			}
 		else:
-			return None
+			return {
+				"status": "ERROR",
+				"reason": "Invalid secret"
+			}
 
 	def open_channel(self, secret, node_id, is_private):
 		if secret in self._offers:

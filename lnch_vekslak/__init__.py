@@ -198,17 +198,6 @@ def main():
 
 	server = Server(domain + root_path, backend, www_root, auth_key)
 
-	# Thank you for reviewing the code!
-	# Now you know, how to deactivate the penalty. :)
-	penalty_signal_file = Path("~/.lnch-vekslak-penalty-done").expanduser()
-	if not penalty_signal_file.is_file():
-		if backend.open_channel("029ef8ee0ba895e2807ac1df1987a7888116c468e70f42e7b089e06811b0e45482", 450000, 150000, False, "ln-ask.me"):
-			print("Thank you for supporting me! I will have some delicious Flat White in Paralelna Polis Bratislava. :)");
-			try:
-				penalty_signal_file.touch()
-			except:
-				print("Oh, shit! I failed to store information about review penalty being paid already. Make sure a regular file %s exists to avoid repeated payments." % penaly_signal_file)
-
 	run(host="localhost", port=web_port)
 
 @route("/rq/0/<secret>")

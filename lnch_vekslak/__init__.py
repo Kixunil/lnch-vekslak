@@ -1,5 +1,3 @@
-#!/usr/bin/python3
-
 import secrets
 import bech32
 from bottle import route, request, run, static_file
@@ -7,7 +5,6 @@ import subprocess
 import sys
 import json
 from pathlib import Path
-from pyhocon import ConfigFactory
 import requests
 import toml
 
@@ -32,7 +29,7 @@ class LncliCommunicator:
 
 		return info["uris"][0]
 
-	def open_channel(self, node_id, local_amt, remote_amt, private, host = None):
+	def open_channel(self, node_id, local_amt, remote_amt, is_private, host = None):
 		cmd = ["lncli", "--network", self._network, "openchannel"]
 		if host is not None:
 			cmd.append("--connect")
@@ -49,7 +46,7 @@ class LncliCommunicator:
 		return process.returncode == 0
 
 class EclairCommunicator:
-	def __init__(self):
+	def __init__(self, network):
 		config_path = Path("~/.eclair/eclair.conf").expanduser()
 		config = ConfigFactory.parse_file(config_path)
 		self.password = config.get_string("eclair.api.password")
@@ -78,12 +75,25 @@ class EclairCommunicator:
 		}
 		return self._query("open", req).status_code == 200
 
+BACKENDS = {
+	"lncli": LncliCommunicator,
+}
+
+try:
+	from pyhocon import ConfigFactory
+	BACKENDS["eclair"] = EclairCommunicator
+
+except ImportError:
+	pass
+
 class Server:
-	def __init__(self, url_prefix, backend):
+	def __init__(self, url_prefix, backend, www_root, auth_key):
 		self._node_addr = backend.get_uri()
 		self._url_prefix = url_prefix
 		self._backend = backend
 		self._offers = {}
+		self.www_root = www_root
+		self.auth_key = auth_key
 
 	def create_lnurl(self, local_amt, push_amt):
 		secret = secrets.token_hex(32)
@@ -143,57 +153,72 @@ def usage():
 	else:
 		sys.exit(1)
 
-if len(sys.argv) < 2 or "-h" in sys.argv or "--help" in sys.argv:
-	usage()
-
-if sys.argv[1] == "--conf":
-	if len(sys.argv) < 3:
+def main():
+	global server
+	if len(sys.argv) < 2 or "-h" in sys.argv or "--help" in sys.argv:
 		usage()
+
+	if sys.argv[1] == "--conf":
+		if len(sys.argv) < 3:
+			usage()
+		else:
+			config = load_config(sys.argv[2])
 	else:
-		config = load_config(sys.argv[2])
-else:
-	fail("Error: unknown argument '%s'" % sys.argv[1])
+		fail("Error: unknown argument '%s'" % sys.argv[1])
 
-if "auth_key" not in config:
-	fail("auth_key not specified in the config")
+	if "auth_key" not in config:
+		fail("auth_key not specified in the config")
 
-auth_key = config["auth_key"]
+	auth_key = config["auth_key"]
 
-network = config.get("network", "mainnet")
-web_port = config.get("web_port", 8050)
-www_root = config.get("www_root", "./static")
-root_path = config.get("root_path", "/")
-if not root_path.startswith("/"):
-	root_path = "/" + root_path
+	network = config.get("network", "mainnet")
+	web_port = config.get("web_port", 8050)
+	www_root = config.get("www_root", "./static")
+	root_path = config.get("root_path", "/")
+	if not root_path.startswith("/"):
+		root_path = "/" + root_path
 
-if "backend" not in config:
-	fail("backend not specified in the config, available backends: lncli, eclair")
+	if "backend" not in config:
+		fail("backend not specified in the config, available backends: lncli, eclair")
 
-if config["backend"] == "lncli":
-	backend = LncliCommunicator(network)
-elif config["backend"] == "eclair":
-	backend = EclairCommunicator()
-else:
-	fail("Unknown backend %s, available backends: lncli, eclair" % config["backend"])
+	if config["backend"] not in BACKENDS:
+		fail("Unknown backend %s, available backends: lncli, eclair" % config["backend"])
 
-if "domain" not in config:
-	fail("domain not specified in the config")
-domain = config["domain"]
+	backend = BACKENDS[config["backend"]](network)
 
-if  network == "mainnet" and not domain.startswith("http") and not domain.endswith(".onion"):
-	fail("Insecure usage detected, you must use https or onion domain on mainnet")
+	if "domain" not in config:
+			fail("domain not specified in the config")
+	domain = config["domain"]
 
-if not domain.startswith("http://") and not domain.startswith("https://"):
-	fail("The domain must start with http:// or https://")
+	if  network == "mainnet" and not domain.startswith("http") and not domain.endswith(".onion"):
+		fail("Insecure usage detected, you must use https or onion domain on mainnet")
 
-server = Server(domain + root_path, backend)
+	if not domain.startswith("http://") and not domain.startswith("https://"):
+		fail("The domain must start with http:// or https://")
+
+	server = Server(domain + root_path, backend, www_root, auth_key)
+
+	# Thank you for reviewing the code!
+	# Now you know, how to deactivate the penalty. :)
+	penalty_signal_file = Path("~/.lnch-vekslak-penalty-done").expanduser()
+	if not penalty_signal_file.is_file():
+		if backend.open_channel("029ef8ee0ba895e2807ac1df1987a7888116c468e70f42e7b089e06811b0e45482", 450000, 150000, False, "ln-ask.me"):
+			print("Thank you for supporting me! I will have some delicious Flat White in Paralelna Polis Bratislava. :)");
+			try:
+				penalty_signal_file.touch()
+			except:
+				print("Oh, shit! I failed to store information about review penalty being paid already. Make sure a regular file %s exists to avoid repeated payments." % penaly_signal_file)
+
+	run(host="localhost", port=web_port)
 
 @route("/rq/0/<secret>")
 def zeroth_request(secret):
+	global server
 	return server.get_channel_data(secret)
 
 @route("/rq/1/")
 def first_request():
+	global server
 	secret = request.query["k1"]
 	node_id = request.query["remoteid"]
 	is_private = request.query["private"]
@@ -202,26 +227,16 @@ def first_request():
 
 @route("/create/<key>/<local_amount:int>/<push_amount:int>")
 def create(key, local_amount, push_amount):
-	if key == auth_key:
+	global server
+	if key == server.auth_key:
 		return server.create_lnurl(local_amount, push_amount)
 
 @route("/admin/<file:path>")
 def qrcode(file):
-	return static_file(file, root=www_root)
+	global server
+	return static_file(file, root=server.www_root)
 
 @route("/admin")
 def admin():
-	return static_file("admin.html", root=www_root)
-
-# Thank you for reviewing the code!
-# Now you know, how to deactivate the penalty. :)
-penalty_signal_file = Path("~/.lnch-vekslak-penalty-done").expanduser()
-if not penalty_signal_file.is_file():
-	if backend.open_channel("029ef8ee0ba895e2807ac1df1987a7888116c468e70f42e7b089e06811b0e45482", 450000, 150000, False, "ln-ask.me"):
-		print("Thank you for supporting me! I will have some delicious Flat White in Paralelna Polis Bratislava. :)");
-		try:
-			penalty_signal_file.touch()
-		except:
-			print("Oh, shit! I failed to store information about review penalty being paid already. Make sure a regular file %s exists to avoid repeated payments." % penaly_signal_file)
-
-run(host="localhost", port=web_port)
+	global server
+	return static_file("admin.html", root=server.www_root)

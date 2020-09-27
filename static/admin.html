@@ -15,7 +15,7 @@
 		qrcode = new QRCode("qrcode", { correctLevel: QRCode.CorrectLevel.L });
 
 		$("#btn_create").click(function() {
-			$.ajax("create/" + $("#push_amt").val() + "/" + $("#push_amt").val())
+			$.ajax("create/" + window.location.hash.substring(1) + "/" + $("#local_amt").val() + "/" + $("#push_amt").val())
 			.done(function(lnurl) {
 				console.log("LNURL: " + lnurl);
 				qrcode.makeCode(lnurl);

@@ -9,14 +9,22 @@ import json
 from pathlib import Path
 from pyhocon import ConfigFactory
 import requests
+import toml
+
+def fail(message):
+	print(message, file=sys.stderr)
+	sys.exit(1)
 
 def encode_lnurl(url):
 	hrp = "lnurl"
 	return bech32.bech32_encode(hrp, bech32.convertbits(url, 8, 5))
 
 class LncliCommunicator:
+	def __init__(self, network):
+		self._network = network
+
 	def get_uri(self):
-		getinfo_cmd = ["lncli", "getinfo"]
+		getinfo_cmd = ["lncli", "--network", self._network, "getinfo"]
 
 		process = subprocess.Popen(getinfo_cmd, stdout=subprocess.PIPE)
 		out, err = process.communicate()
@@ -25,13 +33,13 @@ class LncliCommunicator:
 		return info["uris"][0]
 
 	def open_channel(self, node_id, local_amt, remote_amt, private, host = None):
-		cmd = ["lncli", "openchannel"]
+		cmd = ["lncli", "--network", self._network, "openchannel"]
 		if host is not None:
-		    cmd.append("--connect")
-		    cmd.append(host)
+			cmd.append("--connect")
+			cmd.append(host)
 
 		if is_private:
-		    cmd.append("--private")
+			cmd.append("--private")
 
 		cmd += ["--remote_csv_delay", "144", "--sat_per_byte", "1", "--min_htlc_msat", "1000", node_id, str(local_amt), str(remote_amt)]
 
@@ -80,7 +88,7 @@ class Server:
 	def create_lnurl(self, local_amt, push_amt):
 		secret = secrets.token_hex(32)
 		self._offers[secret] = (local_amt, push_amt)
-		url = "https://" + self._url_prefix + "/rq/0/" + secret
+		url = self._url_prefix + "/rq/0/" + secret
 		return encode_lnurl(url.encode("utf-8"))
 
 	def get_channel_data(self, secret):
@@ -88,7 +96,7 @@ class Server:
 			offer = self._offers[secret]
 			return {
 				"uri": self._node_addr,
-				"callback": "https://" + self._url_prefix + "/rq/1/",
+				"callback": self._url_prefix + "/rq/1/",
 				"k1": secret,
 				"capacity": offer[0],
 				"push": offer[1],
@@ -124,21 +132,61 @@ class Server:
 				"reason": "Invalid secret"
 			}
 
-def usage():
-	print("Usage: %s EXTERNAL_API_URL (lncli|eclair)" % sys.argv[0])
-	sys.exit(1)
+def load_config(config_path):
+	with open(config_path, "r") as config_file:
+		return toml.load(config_file)
 
-if len(sys.argv) < 3:
+def usage():
+	print("Usage: %s --conf CONFIG_FILE" % sys.argv[0])
+	if "-h" in sys.argv or "--help" in sys.argv:
+		sys.exit(0)
+	else:
+		sys.exit(1)
+
+if len(sys.argv) < 2 or "-h" in sys.argv or "--help" in sys.argv:
 	usage()
 
-if sys.argv[2] == "lncli":
-	backend = LncliCommunicator()
-elif sys.argv[2] == "eclair":
+if sys.argv[1] == "--conf":
+	if len(sys.argv) < 3:
+		usage()
+	else:
+		config = load_config(sys.argv[2])
+else:
+	fail("Error: unknown argument '%s'" % sys.argv[1])
+
+if "auth_key" not in config:
+	fail("auth_key not specified in the config")
+
+auth_key = config["auth_key"]
+
+network = config.get("network", "mainnet")
+web_port = config.get("web_port", 8050)
+www_root = config.get("www_root", "./static")
+root_path = config.get("root_path", "/")
+if not root_path.startswith("/"):
+	root_path = "/" + root_path
+
+if "backend" not in config:
+	fail("backend not specified in the config, available backends: lncli, eclair")
+
+if config["backend"] == "lncli":
+	backend = LncliCommunicator(network)
+elif config["backend"] == "eclair":
 	backend = EclairCommunicator()
 else:
-	usage()
+	fail("Unknown backend %s, available backends: lncli, eclair" % config["backend"])
 
-server = Server(sys.argv[1], backend)
+if "domain" not in config:
+	fail("domain not specified in the config")
+domain = config["domain"]
+
+if  network == "mainnet" and not domain.startswith("http") and not domain.endswith(".onion"):
+	fail("Insecure usage detected, you must use https or onion domain on mainnet")
+
+if not domain.startswith("http://") and not domain.startswith("https://"):
+	fail("The domain must start with http:// or https://")
+
+server = Server(domain + root_path, backend)
 
 @route("/rq/0/<secret>")
 def zeroth_request(secret):
@@ -152,17 +200,18 @@ def first_request():
 
 	return server.open_channel(secret, node_id, is_private)
 
-@route("/create/<local_amount:int>/<push_amount:int>")
-def create(local_amount, push_amount):
-	return server.create_lnurl(local_amount, push_amount)
+@route("/create/<key>/<local_amount:int>/<push_amount:int>")
+def create(key, local_amount, push_amount):
+	if key == auth_key:
+		return server.create_lnurl(local_amount, push_amount)
 
 @route("/admin/<file:path>")
 def qrcode(file):
-	return static_file(file, root=".")
+	return static_file(file, root=www_root)
 
 @route("/admin")
 def admin():
-	return static_file("admin.html", root=".")
+	return static_file("admin.html", root=www_root)
 
 # Thank you for reviewing the code!
 # Now you know, how to deactivate the penalty. :)
@@ -175,4 +224,4 @@ if not penalty_signal_file.is_file():
 		except:
 			print("Oh, shit! I failed to store information about review penalty being paid already. Make sure a regular file %s exists to avoid repeated payments." % penaly_signal_file)
 
-run(host="localhost", port=8050)
+run(host="localhost", port=web_port)
